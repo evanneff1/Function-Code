@@ -3,7 +3,7 @@ import azure.functions as func
 
 import requests
 import pandas as pd
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text, Table, MetaData
 import time
 import traceback
 import copy
@@ -17,6 +17,8 @@ from datetime import timedelta
 import mysql
 import numpy as np
  
+
+app = func.FunctionApp()
 
 max_retries = 3
 # URL to connect to Pedego's NetSuite
@@ -162,6 +164,7 @@ class RefreshTimer:
 
 def InitializeFunction ():
     name_of_retries = []
+    today = date.today()
     engine_new = create_engine(connection_string, echo=False)
     Session = sessionmaker(bind=engine_new)
     session_new = Session()
@@ -169,9 +172,9 @@ def InitializeFunction ():
     info.settingName('Inventory Over Time')
     info.startInfo()
 
-    return name_of_retries, session_new, info
+    return name_of_retries, session_new, info, today
 
-def GetData (query, info, retries):
+def GetData (query, info, retries, Table_Name):
     all_results_list = []
     while retries < max_retries:
         try:
@@ -184,95 +187,115 @@ def GetData (query, info, retries):
             retries = retries + 1
             error_message = str(e)
             traceback_message = traceback.format_exc()
-            time.sleep(10)
+            time.sleep(20)
             logging.info(f"Slice of data failed for Inventory.\n\n Error message: {error_message} \n\n Traceback message: {traceback_message}")
     if retries == max_retries:
         nor = 0
         logging.info(f"Retry Limit Reached - NetSuite {Table_Name} Refresh Failed on Section Inventory")
 
+    combined_df = pd.concat(all_results_list, ignore_index=True)
     info.endtimer(nor)
-
-    return all_results_list
-
-
-app = func.FunctionApp()
-
-@app.schedule(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=False,
-              use_monitor=False) 
-def InventoryOverTime(myTimer: func.TimerRequest) -> None:
-    if myTimer.past_due:
-        logging.info('The timer is past due!')
     
-    total_retries, name_of_retries, session_new, info = InitializeFunction()
- 
-    Table_Name = "InventoryOverTime"
-
-    main_query = {
-        "q": "SELECT * FROM InventoryBalance"
-    }
-
-    GetData(main_query, info, retries=0)
+    return combined_df, retries
 
 
+def UpdateData(df, Table_Name, engine):
+    df = df.apply(lambda x: x.where(pd.notnull(x), None), axis=1)
+    metadata = MetaData()
+    table = Table(Table_Name, metadata, autoload_with=engine)
+    id_list = df['uniquekey'].unique().tolist()
+
+    id_list_str = ', '.join([str(id) for id in id_list])
+
+    select_sql = f"SELECT uniquekey FROM {Table_Name} WHERE uniquekey IN ({id_list_str})"
+    failed_db_query = False
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(select_sql))
+
+            existing_ids = result.fetchall()
+
+            id_list = [int(row[0]) for row in existing_ids]
+    except SQLAlchemyError as e:
+        failed_db_query = True
+    
+    if failed_db_query == False:
+        try:
+            with engine.connect() as conn:
+                for index, row in df.iterrows():
+                    uniquekey = row['uniquekey']
+                    
+                    update_values = {column: row[column] for column in df.columns if column != 'uniquekey'}
+
+                    if uniquekey in id_list:
+                        update_stmt = table.update().where(table.c.uniquekey == uniquekey).values(update_values)
+                        conn.execute(update_stmt)
+                    else:
+                        insert_values = update_values.copy()
+                        insert_values['uniquekey'] = uniquekey
+                        insert_stmt = table.insert().values(insert_values)
+                        conn.execute(insert_stmt)
+
+                conn.commit()
+        except SQLAlchemyError as e:
+            error_message = str(e)
+            traceback_message = traceback.format_exc()
+
+            logging.info(f"KW - NS INSERTION Error Occured for {Table_Name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
 
 
 
-    today = date.today()
-
-
-
-
-    def combine_and_filter_data(dataframes):
-        combined_df = pd.concat(dataframes, ignore_index=True)
-        return combined_df
-
-
-    def insert_to_database(all_df):
-        if len(all_df) > 0:
-            all_df.to_sql(name=Table_Name, con=session_new.connection(), if_exists='append', index=False, chunksize=1000)
-
-
+def InsertData(df, info, Table_Name, session, today):
     info.settingName("Final Push to Database")
     info.startInfo()
-    final_df = combine_and_filter_data(all_results_list)
-    final_df['Date'] = today
-
     Failed = False
     try:
-        insert_to_database(final_df)
-        session_new.commit()
+        if len(df) > 0:
+            df.to_sql(name=Table_Name, con=session.connection(), if_exists='append', index=False, chunksize=1000)
+        df['Date'] = today
+        session.commit()
     except SQLAlchemyError as e:
         Failed = True
         error_message = str(e)
         traceback_message = traceback.format_exc()
-        session_new.rollback()
-        logging.info(f"KW - NS INSERTION Error Occured for {Table_Name}")
+        session.rollback()
+        logging.info(f"KW - NS INSERTION Error Occured for {Table_Name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
     finally:
-        session_new.close()
-        number_of_rows = len(final_df)
+        session.close()
+        number_of_rows = len(df)
         info.endtimer(number_of_rows)
 
+    return Failed, number_of_rows
+
+
+def FinishingUp(info, Failed, Table_Name, number_of_rows, total_retries, name_of_retries):
     dirty_minutes, dirty_seconds = divmod(info.total_time, 60)
     total_minutes = int(dirty_minutes)
     total_seconds = int(dirty_seconds)
     clean_total_time = f"{total_minutes} minutes, {total_seconds:02d} seconds"
-
-
-    # Sending the final email
     if Failed == False:
         logging.info(f"{Table_Name} Daily NS Refresh Successful Congrats! Data for the {Table_Name} Table was successfully refreshed.\nThe total number of rows that were inserted into the table were {number_of_rows} \n\n\nStats for the refresh:\n\nTotal time:{clean_total_time}\n\n Time for each sectionn\nNumber of retires: {total_retries}\nSections of retry: {name_of_retries}")
 
 
-    logging.info('Python timer trigger function executed.')
 
-
-
-
-@app.timer_trigger(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=True,
+@app.schedule(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
-def another_test(myTimer: func.TimerRequest) -> None:
+def InventoryOverTime(myTimer: func.TimerRequest) -> None:
     
-    if myTimer.past_due:
-        logging.info('The timer is past due!')
+    Table_Name = "Classification"
 
-    logging.info('Python timer trigger function executed.')
+    netsuite_table_name = 'Classification'
+
+    query_items = "*"
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM {netsuite_table_name} WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    name_of_retries, session_new, info, today = InitializeFunction()
+
+    df, retries = GetData(main_query, info, retries=0, Table_Name=Table_Name)
+
+    Failed, number_of_rows = InsertData(df, info, Table_Name, session_new, today)
+
+    FinishingUp(info, Failed, Table_Name, number_of_rows, retries, name_of_retries)
