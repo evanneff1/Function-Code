@@ -199,7 +199,7 @@ def GetData (query, info, retries, Table_Name):
     return combined_df, retries
 
 
-def UpdateData(df, Table_Name, engine):
+def UpdateData(df, Table_Name, engine, session):
     df = df.apply(lambda x: x.where(pd.notnull(x), None), axis=1)
     metadata = MetaData()
     table = Table(Table_Name, metadata, autoload_with=engine)
@@ -221,7 +221,7 @@ def UpdateData(df, Table_Name, engine):
     
     if failed_db_query == False:
         try:
-            with engine.connect() as conn:
+            with session() as conn:
                 for index, row in df.iterrows():
                     uniquekey = row['uniquekey']
                     
@@ -281,6 +281,8 @@ def FinishingUp(info, Failed, Table_Name, number_of_rows, total_retries, name_of
 @app.schedule(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def InventoryOverTime(myTimer: func.TimerRequest) -> None:
+
+    unique_identifier = 'uniquekey'
     
     Table_Name = "Classification"
 
@@ -295,6 +297,8 @@ def InventoryOverTime(myTimer: func.TimerRequest) -> None:
     name_of_retries, session_new, info, today = InitializeFunction()
 
     df, retries = GetData(main_query, info, retries=0, Table_Name=Table_Name)
+
+    UpdateData(df, Table_Name, )
 
     Failed, number_of_rows = InsertData(df, info, Table_Name, session_new, today)
 
