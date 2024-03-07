@@ -16,24 +16,21 @@ import time
 from datetime import timedelta
 import mysql
 import numpy as np
- 
+import os
+
+
+consumer = os.environ['consumer']
+consumer_secret = os.environ['consumerSecret']
+token = os.environ['token']
+token_secret = os.environ['tokenSecret']
+realm = os.environ['realm']
+connection_string = os.environ['connectionString']
 
 app = func.FunctionApp()
 
 max_retries = 3
-# URL to connect to Pedego's NetSuite
-url = "https://4550201.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
 
-consumer = "4e7920040841eb8a3f65a3a90b0f142cdd22e4db26c733e4d0f7decaf03c46f5"
-consumer_secret = "988bc3bde021a1b4f018bc2e87f31d338a4ab19cc3c1ab0a7efed06abc731e6e"
-token = "102813540121dd09f08df547d176787de25ea477bfdb6c844179c7dda08f9008"
-token_secret = "563a75d6b47db6f42456a59f63de8e6114edb9f4fb7072ea8cc8f54bb573b3dc"
-
-connection_string = 'mssql+pyodbc:///?odbc_connect=Driver={ODBC Driver 18 for SQL Server};Server=tcp:mysqlserverpedego.database.windows.net,1433;Database=pedego;Uid=azureuser;Pwd=TbZQJ@TNaS1MWp4BPMJ$;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
-
-# We can send error emails through Azure Function (https://medium.com/@elnably/setting-up-email-alerts-when-your-azure-functions-fail-a049f766309e)
-
-# Will be using Azure Secrets to manage secret info.
+url = f"https://{realm}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
 
 class APIDataFetcher:
     '''
@@ -49,28 +46,29 @@ class APIDataFetcher:
         self.url = url
         self.query = query
         self.number_of_rows = None
+        self.realm = realm
 
-    def create_header_non_self():
-        http_method = "POST"
-        realm = "4550201" 
-        client = oauth1.Client(consumer, 
-                             client_secret=consumer_secret, 
-                             resource_owner_key=token, 
-                             resource_owner_secret=token_secret, 
-                             signature_method=oauth1.SIGNATURE_HMAC_SHA256, 
-                             signature_type=oauth1.SIGNATURE_TYPE_AUTH_HEADER,
-                             realm=realm 
-                             )
-        uri, headers, body = client.sign(url, http_method=http_method)
-        headers['prefer']='transient'
-        return headers
+    # def create_header_non_self():
+    #     http_method = "POST"
+    #     realm = realm
+    #     client = oauth1.Client(consumer, 
+    #                          client_secret=consumer_secret, 
+    #                          resource_owner_key=token, 
+    #                          resource_owner_secret=token_secret, 
+    #                          signature_method=oauth1.SIGNATURE_HMAC_SHA256, 
+    #                          signature_type=oauth1.SIGNATURE_TYPE_AUTH_HEADER,
+    #                          realm=realm 
+    #                          )
+    #     uri, headers, body = client.sign(url, http_method=http_method)
+    #     headers['prefer']='transient'
+    #     return headers
 
     def create_header(self):
         '''
-        Creates header to retrieve data through the API???
+        Creates header to retrieve data through the API
         '''
         http_method = "POST"
-        realm = "4550201"
+        realm = self.realm
         client = oauth1.Client(consumer, 
                              client_secret=consumer_secret, 
                              resource_owner_key=token, 
@@ -85,7 +83,7 @@ class APIDataFetcher:
         
     def fetch_data(self):
         '''
-        Compiles data extracted through the API???
+        Compiles data extracted through the API
         '''
         self.dataframes = []
         while self.url:
@@ -107,7 +105,7 @@ class APIDataFetcher:
 
     def _update_url(self, main_data):
         '''
-        Updates the URL for the API to determine if more data is coming in???
+        Updates the URL for the API to determine if more data is coming in
         '''
         self.url = None
         for link in main_data['links']:
@@ -178,6 +176,8 @@ class DataProcessingService:
         self.unique_identifier = unique_identifier
 
     def GetData(self):
+        self.info.settingName(self.table_name)
+        self.info.startInfo()
         while self.retries < max_retries:
             try:
                 data_df = self.data_fetcher.fetch_data()
@@ -224,7 +224,7 @@ class DataProcessingService:
         finally:
             self.Session.close()
             self.info.endtimer(len(self.nor))
-            FinishingUp(Failed)
+            self.FinishingUp(Failed)
 
 
     def FinishingUp(self, Failed):
@@ -233,76 +233,97 @@ class DataProcessingService:
         total_seconds = int(dirty_seconds)
         clean_total_time = f"{total_minutes} minutes, {total_seconds:02d} seconds"
         if Failed == False:
-            logging.info(f"{self.table_name} Daily NS Refresh Successful Congrats! Data for the {self.table_name} Table was successfully refreshed.\nThe total number of rows that were inserted into the table were {self.nor} \n\n\nStats for the refresh:\n\nTotal time:{clean_total_time}\n\n Time for each sectionn\nNumber of retires: {self.retries}\nSections of retry: {self.name_of_retries}")
+            logging.info(f"{self.table_name} Daily NS Refresh Successful Congrats! Data for the {self.table_name} Table was successfully refreshed.\nThe total number of rows that were inserted into the table were {self.nor} \n\n\nStats for the refresh:\n\nTotal time: {clean_total_time}\n\nNumber of retires: {self.retries}")
+        else:
+            logging.info("Failed to insert into Database")
 
         
     def UpdateData(self):
-        df = self.processed_data(lambda x: x.where(pd.notnull(x), None), axis=1)
-        metadata = MetaData()
-        table = Table(self.table_name, metadata, autoload_with=self.engine)
-        id_list = self.processed_data[self.unique_identifier].unique().tolist()
-        id_list_str = ', '.join([str(id) for id in id_list])
-        select_sql = f"SELECT uniquekey FROM {self.table_name} WHERE uniquekey IN ({id_list_str})"
-        failed_db_query = False
-        try:
-            with self.engine.connect() as conn:
-                result = conn.execute(text(select_sql))
-
-                existing_ids = result.fetchall()
-
-                id_list = [int(row[0]) for row in existing_ids]
-            
-        except SQLAlchemyError as e:
-            failed_db_query = True
-    
-        if failed_db_query == False:
+        if self.nor > 0:
+            self.info.settingName("Final Push to Database")
+            self.info.startInfo()
+            df = self.processed_data.apply(lambda x: x.where(pd.notnull(x), None), axis=1)
+            metadata = MetaData()
+            table = Table(self.table_name, metadata, autoload_with=self.engine)
+            id_list = self.processed_data[self.unique_identifier].unique().tolist()
+            id_list_str = ', '.join([str(id) for id in id_list])
+            select_sql = f"SELECT {self.unique_identifier} FROM {self.table_name} WHERE {self.unique_identifier} IN ({id_list_str})"
+            failed_db_query = False
             try:
-                with self.Session() as conn:
-                    for index, row in df.iterrows():
-                        uniquekey = row[self.unique_identifier]
-                        column = getattr(table.c, self.unique_identifier)
-                        
-                        update_values = {column: row[column] for column in df.columns if column != self.unique_identifier}
+                with self.engine.connect() as conn:
+                    result = conn.execute(text(select_sql))
 
-                        if uniquekey in id_list:
-                            update_stmt = table.update().where(column == uniquekey).values(update_values)
+                    existing_ids = result.fetchall()
 
-                            conn.execute(update_stmt)
-                        else:
-                            insert_values = update_values.copy()
-                            insert_values[self.unique_identifier] = uniquekey
-                            insert_stmt = table.insert().values(insert_values)
-                            conn.execute(insert_stmt)
-                    conn.commit()
-
+                    id_list = [int(row[0]) for row in existing_ids]
+                
             except SQLAlchemyError as e:
-                self.Session.rollback()
+                failed_db_query = True
                 error_message = str(e)
                 traceback_message = traceback.format_exc()
-
                 logging.info(f"KW - NS INSERTION Error Occured for {self.table_name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
+        
+            if failed_db_query == False:
+                try:
+                    with self.Session() as conn:
+                        for index, row in df.iterrows():
+                            uniquekey = int(row[self.unique_identifier])
+                            column = getattr(table.c, self.unique_identifier)
+                            
+                            update_values = {column: row[column] for column in df.columns if column != self.unique_identifier}
+
+                            if uniquekey in id_list:
+                                update_stmt = table.update().where(column == uniquekey).values(update_values)
+
+                                conn.execute(update_stmt)
+                            else:
+                                insert_values = update_values.copy()
+                                insert_values[self.unique_identifier] = uniquekey
+                                insert_stmt = table.insert().values(insert_values)
+                                conn.execute(insert_stmt)
+                        conn.commit()
+
+                except SQLAlchemyError as e:
+                    self.Session.rollback()
+                    error_message = str(e)
+                    traceback_message = traceback.format_exc()
+
+                    logging.info(f"KW - NS INSERTION Error Occured for {self.table_name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
+                finally: 
+                    self.info.endtimer(self.nor)
+                    self.FinishingUp(failed_db_query)
+        else:
+            logging.info(f'No updates occured. There were no changes over the past day for {self.table_name}')
 
 
-
-
-
-
+@app.schedule(schedule="0 55 0 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def WarmingUp(myTimer: func.TimerRequest) -> None:
+    warmup_engine = create_engine(connection_string, echo=False, connect_args={'connect_timeout': 60})
+    try:
+        with warmup_engine.connect() as conn:
+            result = conn.execute(text("SELECT 1"))
+            main = result.fetchall()
+            logging.info(main[0][0 ])
+    except SQLAlchemyError as e:
+        logging.info("Warming up failed")
 
 
 @app.schedule(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
-def InventoryOverTime(myTimer: func.TimerRequest) -> None:
+def Classifications(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer) 
 
-    unique_identifier = 'uniquekey'
+    unique_identifier = 'id'
     
-    Table_Name = "Classification"
+    Table_Name = "Classification" 
 
     netsuite_table_name = 'Classification'
 
-    query_items = "*"
+    query_items = 'externalid, fullname, id, includechildren, isinactive, lastmodifieddate, name, subsidiary, parent, custrecord_n101_cseg_business_unit'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM {netsuite_table_name} WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
     }
 
     data_fetcher = APIDataFetcher(query=main_query)
@@ -310,130 +331,303 @@ def InventoryOverTime(myTimer: func.TimerRequest) -> None:
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
 
-    processing_service.process_and_time_data_fetching()
+    processing_service.GetData()
 
     processing_service.UpdateData()
 
 
+@app.schedule(schedule="0 3 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def Invoices(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
 
-
-
-
-
-def InitializeFunction ():
-    name_of_retries = []
-    today = date.today()
-    engine_new = create_engine(connection_string, echo=False)
-    Session = sessionmaker(bind=engine_new)
-    session_new = Session()
-    info = RefreshTimer()
-    info.settingName('Inventory Over Time')
-    info.startInfo()
-
-    return name_of_retries, session_new, info, today
-
-
-
-
-
-def GetData (query, info, retries, Table_Name):
-    all_results_list = []
-    while retries < max_retries:
-        try:
-            api_section_class = APIDataFetcher(query=query)
-            results_df = api_section_class.fetch_data()
-            all_results_list.append(results_df)
-            nor = len(results_df)
-            break
-        except Exception as e:
-            retries = retries + 1
-            error_message = str(e)
-            traceback_message = traceback.format_exc()
-            time.sleep(20)
-            logging.info(f"Slice of data failed for Inventory.\n\n Error message: {error_message} \n\n Traceback message: {traceback_message}")
-    if retries == max_retries:
-        nor = 0
-        logging.info(f"Retry Limit Reached - NetSuite {Table_Name} Refresh Failed on Section Inventory")
-
+    unique_identifier = 'id'
     
+    Table_Name = "Invoices" 
+
+    netsuite_table_name = 'CustInvc'
+
+    query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 7 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def ItemCategory(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'id'
     
-    return combined_df, retries
+    Table_Name = "ItemCategory" 
+
+    netsuite_table_name = 'CUSTOMLIST_ITEM_CATEGORY'
+
+    query_items = 'id, name'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
 
 
+@app.schedule(schedule="0 12 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def Customers(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
 
-
-def UpdateData(df, Table_Name, engine, session):
-    df = df.apply(lambda x: x.where(pd.notnull(x), None), axis=1)
-    metadata = MetaData()
-    table = Table(Table_Name, metadata, autoload_with=engine)
-    id_list = df['uniquekey'].unique().tolist()
-
-    id_list_str = ', '.join([str(id) for id in id_list])
-
-    select_sql = f"SELECT uniquekey FROM {Table_Name} WHERE uniquekey IN ({id_list_str})"
-    failed_db_query = False
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text(select_sql))
-
-            existing_ids = result.fetchall()
-
-            id_list = [int(row[0]) for row in existing_ids]
-    except SQLAlchemyError as e:
-        failed_db_query = True
+    unique_identifier = 'id'
     
-    if failed_db_query == False:
-        try:
-            with session() as conn:
-                for index, row in df.iterrows():
-                    uniquekey = row['uniquekey']
-                    
-                    update_values = {column: row[column] for column in df.columns if column != 'uniquekey'}
+    Table_Name = "Customers" 
 
-                    if uniquekey in id_list:
-                        update_stmt = table.update().where(table.c.uniquekey == uniquekey).values(update_values)
-                        conn.execute(update_stmt)
-                    else:
-                        insert_values = update_values.copy()
-                        insert_values['uniquekey'] = uniquekey
-                        insert_stmt = table.insert().values(insert_values)
-                        conn.execute(insert_stmt)
+    netsuite_table_name = 'Customers'
 
-                conn.commit()
-        except SQLAlchemyError as e:
-            error_message = str(e)
-            traceback_message = traceback.format_exc()
+    query_items = 'id, entitytitle, isperson, defaultshippingaddress'
 
-            logging.info(f"KW - NS INSERTION Error Occured for {Table_Name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
+    main_query = {
+        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
 
-def InsertData(df, info, Table_Name, session, today):
-    info.settingName("Final Push to Database")
-    info.startInfo()
-    Failed = False
-    try:
-        if len(df) > 0:
-            df.to_sql(name=Table_Name, con=session.connection(), if_exists='append', index=False, chunksize=1000)
-        df['Date'] = today
-        session.commit()
-    except SQLAlchemyError as e:
-        Failed = True
-        error_message = str(e)
-        traceback_message = traceback.format_exc()
-        session.rollback()
-        logging.info(f"KW - NS INSERTION Error Occured for {Table_Name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
-    finally:
-        session.close()
-        number_of_rows = len(df)
-        info.endtimer(number_of_rows)
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
 
-    return Failed, number_of_rows
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
 
 
-def FinishingUp(info, Failed, Table_Name, number_of_rows, total_retries, name_of_retries):
-    dirty_minutes, dirty_seconds = divmod(info.total_time, 60)
-    total_minutes = int(dirty_minutes)
-    total_seconds = int(dirty_seconds)
-    clean_total_time = f"{total_minutes} minutes, {total_seconds:02d} seconds"
-    if Failed == False:
-        logging.info(f"{Table_Name} Daily NS Refresh Successful Congrats! Data for the {Table_Name} Table was successfully refreshed.\nThe total number of rows that were inserted into the table were {number_of_rows} \n\n\nStats for the refresh:\n\nTotal time:{clean_total_time}\n\n Time for each sectionn\nNumber of retires: {total_retries}\nSections of retry: {name_of_retries}")
+@app.schedule(schedule="0 15 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def InventoryOverTime(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
 
+    unique_identifier = 'inventorynumber'
+    
+    Table_Name = "InventoryOverTime" 
+
+    netsuite_table_name = 'InventoryBalance'
+
+    query_items = 'binnumber, committedqtyperlocation, committedqtyperseriallotnumber, committedqtyperseriallotnumberlocation, inventorynumber, item, location, quantityavailable, quantityonhand, quantitypicked'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM '{netsuite_table_name}'"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.InsertData()
+
+
+@app.schedule(schedule="0 22 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "InvoicesLineItems" 
+
+    netsuite_table_name = 'CustInvc'
+
+    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= TRUNC(SYSDATE - 1) AND linelastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 28 1 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def ItemFulfillments(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'id'
+    
+    Table_Name = "ItemFulfillments" 
+
+    netsuite_table_name = 'ItemShip'
+
+    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 32 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "ItemFulfillmentLineItems" 
+
+    netsuite_table_name = 'ItemShip'
+
+    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= TRUNC(SYSDATE - 1) AND linelastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 39 1 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def SalesOrders(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'id'
+    
+    Table_Name = "SalesOrders" 
+
+    netsuite_table_name = 'SalesOrd'
+
+    query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 43 1 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "SalesOrderTransactionLine" 
+
+    netsuite_table_name = 'SalesOrd'
+
+    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped, quantity'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= TRUNC(SYSDATE - 1) AND linelastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 50 1 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def Items(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'id'
+    
+    Table_Name = "Items" 
+
+    netsuite_table_name = 'item'
+
+    query_items = 'id, class, displayname, lastmodifieddate, custitem_model, custitem_item_category, totalquantityonhand, custitem_ped_model, custitem_ped_battery_size'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 57 1 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def Locations(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'id'
+    
+    Table_Name = "Location" 
+
+    netsuite_table_name = 'Location'
+
+    query_items = 'custrecord1, custrecord_loc_shiphawk_warehouse_code, fullname, id, includechildren, isinactive, lastmodifieddate, mainaddress, makeinventoryavailable, makeinventoryavailablestore, name, returnaddress, subsidiary, usebins, custrecord_n103_cseg_business_unit, locationtype, parent'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
