@@ -3,7 +3,7 @@ import azure.functions as func
 
 import requests
 import pandas as pd
-from sqlalchemy import create_engine, text, Table, MetaData
+from sqlalchemy import create_engine, text, Table, MetaData, select, func as sqlfunc
 import time
 import traceback
 import copy
@@ -11,9 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 import json
 from oauthlib import oauth1
-from datetime import date
 import time
-from datetime import timedelta
+from datetime import timedelta, datetime
 import mysql
 import numpy as np
 import os
@@ -25,6 +24,9 @@ token = os.environ['token']
 token_secret = os.environ['tokenSecret']
 realm = os.environ['realm']
 connection_string = os.environ['connectionString']
+
+today = datetime.now().strftime('%m/%d/%Y')
+yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
 app = func.FunctionApp()
 
@@ -48,20 +50,6 @@ class APIDataFetcher:
         self.number_of_rows = None
         self.realm = realm
 
-    # def create_header_non_self():
-    #     http_method = "POST"
-    #     realm = realm
-    #     client = oauth1.Client(consumer, 
-    #                          client_secret=consumer_secret, 
-    #                          resource_owner_key=token, 
-    #                          resource_owner_secret=token_secret, 
-    #                          signature_method=oauth1.SIGNATURE_HMAC_SHA256, 
-    #                          signature_type=oauth1.SIGNATURE_TYPE_AUTH_HEADER,
-    #                          realm=realm 
-    #                          )
-    #     uri, headers, body = client.sign(url, http_method=http_method)
-    #     headers['prefer']='transient'
-    #     return headers
 
     def create_header(self):
         '''
@@ -80,6 +68,9 @@ class APIDataFetcher:
         uri, headers, body = client.sign(self.url, http_method=http_method)
         headers['prefer']='transient'
         return headers
+    
+    def get_date(self):
+        logging.info(f"Start Time: {yesterday} \n End Time: {today}")
         
     def fetch_data(self):
         '''
@@ -168,14 +159,14 @@ class DataProcessingService:
         self.retries = 0
         self.name_of_retires = []
         self.all_results_list = []
-        self.today = date.today()
         self.engine = create_engine(connection_string, echo=False)
-        self.Session = sessionmaker(bind=self.engine)
+        # self.Session = sessionmaker(bind=self.engine)
         self.table_name = table_name
         self.nor = 0
         self.unique_identifier = unique_identifier
 
     def GetData(self):
+        self.data_fetcher.get_date()
         self.info.settingName(self.table_name)
         self.info.startInfo()
         while self.retries < max_retries:
@@ -213,17 +204,14 @@ class DataProcessingService:
         try:
             if len(self.processed_data) > 0:
                 self.processed_data['Date'] = self.today
-                self.processed_data.to_sql(name=self.table_name, con=self.Session.connection(), if_exists='append', index=False, chunksize=1000)
-                self.Session.commit()
+                self.processed_data.to_sql(name=self.table_name, con=self.engine, if_exists='append', index=False, chunksize=1000)
         except SQLAlchemyError as e:
             Failed = True
             error_message = str(e)
             traceback_message = traceback.format_exc()
-            self.Session.rollback()
             logging.info(f"KW - NS INSERTION Error Occured for {self.table_name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
         finally:
-            self.Session.close()
-            self.info.endtimer(len(self.nor))
+            self.info.endtimer(self.nor)
             self.FinishingUp(Failed)
 
 
@@ -233,70 +221,103 @@ class DataProcessingService:
         total_seconds = int(dirty_seconds)
         clean_total_time = f"{total_minutes} minutes, {total_seconds:02d} seconds"
         if Failed == False:
-            logging.info(f"{self.table_name} Daily NS Refresh Successful Congrats! Data for the {self.table_name} Table was successfully refreshed.\nThe total number of rows that were inserted into the table were {self.nor} \n\n\nStats for the refresh:\n\nTotal time: {clean_total_time}\n\nNumber of retires: {self.retries}")
+            logging.info(f"{self.table_name} Daily NS Refresh Successful Congrats! Data for the {self.table_name} Table was successfully refreshed.\nThe total number of rows that were updated in the table were {self.nor} \n\n\nStats for the refresh:\n\nTotal time: {clean_total_time}\n\nNumber of retires: {self.retries}")
         else:
             logging.info("Failed to insert into Database")
-
+    
+    def CountOfRows(self, table, conn, statement):
+        count_query = select(sqlfunc.count()).select_from(table)
+        result = conn.execute(count_query)
+        total_rows = result.scalar()
+        logging.info(f"{statement}: {total_rows}")
         
     def UpdateData(self):
         if self.nor > 0:
-            self.info.settingName("Final Push to Database")
+            self.info.settingName("Getting Update Values from DB")
             self.info.startInfo()
             df = self.processed_data.apply(lambda x: x.where(pd.notnull(x), None), axis=1)
             metadata = MetaData()
             table = Table(self.table_name, metadata, autoload_with=self.engine)
-            id_list = self.processed_data[self.unique_identifier].unique().tolist()
-            id_list_str = ', '.join([str(id) for id in id_list])
-            select_sql = f"SELECT {self.unique_identifier} FROM {self.table_name} WHERE {self.unique_identifier} IN ({id_list_str})"
+            id_list = df[self.unique_identifier].unique().tolist()
+            temp_table_name = "temp_unique_ids"
+            temp_table = text(f"CREATE TABLE {temp_table_name} (id INT PRIMARY KEY);")
             failed_db_query = False
             try:
                 with self.engine.connect() as conn:
-                    result = conn.execute(text(select_sql))
+                    conn.execute(temp_table)
+                    id_values = [{'id': id_value} for id_value in id_list]
 
-                    existing_ids = result.fetchall()
+                    insert_statement = text(f"INSERT INTO {temp_table_name} (id) VALUES (:id)")
+                    conn.execute(insert_statement, id_values)
+                    
+                    join_sql = text(f"""
+                    SELECT t.{self.unique_identifier}
+                    FROM {self.table_name} t
+                    JOIN {temp_table_name} temp ON t.{self.unique_identifier} = temp.id
+                    """)
+                    existing_ids = conn.execute(join_sql).fetchall()
+                    
+                    drop_stmt = text(f"DROP TABLE {temp_table_name}")
+                    conn.execute(drop_stmt)
 
-                    id_list = [int(row[0]) for row in existing_ids]
-                
+                id_list = [row[0] for row in existing_ids]
+                self.info.endtimer(self.nor)
+
             except SQLAlchemyError as e:
                 failed_db_query = True
                 error_message = str(e)
                 traceback_message = traceback.format_exc()
                 logging.info(f"KW - NS INSERTION Error Occured for {self.table_name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
-        
-            if failed_db_query == False:
+
+            if not failed_db_query:
                 try:
-                    with self.Session() as conn:
-                        for index, row in df.iterrows():
-                            uniquekey = int(row[self.unique_identifier])
-                            column = getattr(table.c, self.unique_identifier)
-                            
-                            update_values = {column: row[column] for column in df.columns if column != self.unique_identifier}
+                    insert_data = []
+                    update_data = []
 
-                            if uniquekey in id_list:
-                                update_stmt = table.update().where(column == uniquekey).values(update_values)
+                    for index, row in df.iterrows():
+                        data_dict = row.to_dict()
+                        uniquekey = data_dict.pop(self.unique_identifier)
 
-                                conn.execute(update_stmt)
-                            else:
-                                insert_values = update_values.copy()
-                                insert_values[self.unique_identifier] = uniquekey
-                                insert_stmt = table.insert().values(insert_values)
-                                conn.execute(insert_stmt)
-                        conn.commit()
+                        if uniquekey in id_list:
+                            data_dict[self.unique_identifier] = uniquekey
+                            update_data.append(data_dict)
+                        else:
+                            data_dict[self.unique_identifier] = uniquekey
+                            insert_data.append(data_dict)
+
+                    with self.engine.begin() as conn:
+                        if insert_data:
+                            self.info.settingName("Inserting New Values")
+                            self.info.startInfo()
+                            self.CountOfRows(table, conn, "Before Insert")
+                            conn.execute(table.insert(), insert_data)
+                            self.CountOfRows(table, conn, "After Insert")
+                            self.info.endtimer(len(insert_data))
+
+                        if update_data:
+                            self.info.settingName("Updating Existing Values")
+                            self.info.startInfo()
+                            ids_to_update = [row[self.unique_identifier] for row in update_data] 
+                            delete_statement = table.delete().where(table.c[self.unique_identifier].in_(ids_to_update))
+                            conn.execute(delete_statement)
+                            self.CountOfRows(table, conn, "After Update Delete")
+                            conn.execute(table.insert(), update_data)
+                            self.CountOfRows(table, conn, "After Update Insert")
+                            self.info.endtimer(len(update_data))
 
                 except SQLAlchemyError as e:
-                    self.Session.rollback()
+                    failed_db_query = True
                     error_message = str(e)
                     traceback_message = traceback.format_exc()
-
                     logging.info(f"KW - NS INSERTION Error Occured for {self.table_name}\n Error Message: {error_message} \n Traceback Message: {traceback_message}")
+
                 finally: 
-                    self.info.endtimer(self.nor)
                     self.FinishingUp(failed_db_query)
         else:
             logging.info(f'No updates occured. There were no changes over the past day for {self.table_name}')
 
 
-@app.schedule(schedule="0 55 0 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 55 1 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def WarmingUp(myTimer: func.TimerRequest) -> None:
     warmup_engine = create_engine(connection_string, echo=False, connect_args={'connect_timeout': 60})
@@ -309,7 +330,7 @@ def WarmingUp(myTimer: func.TimerRequest) -> None:
         logging.info("Warming up failed")
 
 
-@app.schedule(schedule="0 0 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 0 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def Classifications(myTimer: func.TimerRequest) -> None:
     logging.info(consumer) 
@@ -323,12 +344,11 @@ def Classifications(myTimer: func.TimerRequest) -> None:
     query_items = 'externalid, fullname, id, includechildren, isinactive, lastmodifieddate, name, subsidiary, parent, custrecord_n101_cseg_business_unit'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
-    }
+            "q": f"SELECT {query_items} FROM {netsuite_table_name}"
+        }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query)    
     refresh_timer = RefreshTimer()
-
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
 
     processing_service.GetData()
@@ -336,7 +356,7 @@ def Classifications(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 3 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 5 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def Invoices(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -345,13 +365,13 @@ def Invoices(myTimer: func.TimerRequest) -> None:
     
     Table_Name = "Invoices" 
 
-    netsuite_table_name = 'CustInvc'
+    netsuite_table_name = "CustInvc"
 
     query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
-    }
+            "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+        }
 
     data_fetcher = APIDataFetcher(query=main_query)
     refresh_timer = RefreshTimer()
@@ -363,7 +383,7 @@ def Invoices(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 7 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 10 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def ItemCategory(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -375,12 +395,12 @@ def ItemCategory(myTimer: func.TimerRequest) -> None:
     netsuite_table_name = 'CUSTOMLIST_ITEM_CATEGORY'
 
     query_items = 'id, name'
-
+   
     main_query = {
-        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
-    }
+            "q": f"SELECT {query_items} FROM {netsuite_table_name}"
+        }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -390,7 +410,7 @@ def ItemCategory(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 12 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 15 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def Customers(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -399,13 +419,13 @@ def Customers(myTimer: func.TimerRequest) -> None:
     
     Table_Name = "Customers" 
 
-    netsuite_table_name = 'Customers'
+    netsuite_table_name = 'Customer'
 
     query_items = 'id, entitytitle, isperson, defaultshippingaddress'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
-    }
+            "q": f"SELECT {query_items} FROM {netsuite_table_name} WHERE (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+        }
 
     data_fetcher = APIDataFetcher(query=main_query)
     refresh_timer = RefreshTimer()
@@ -417,7 +437,7 @@ def Customers(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 15 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 20 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def InventoryOverTime(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -431,8 +451,8 @@ def InventoryOverTime(myTimer: func.TimerRequest) -> None:
     query_items = 'binnumber, committedqtyperlocation, committedqtyperseriallotnumber, committedqtyperseriallotnumberlocation, inventorynumber, item, location, quantityavailable, quantityonhand, quantitypicked'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM '{netsuite_table_name}'"
-    }
+            "q": f"SELECT {query_items} FROM {netsuite_table_name}"
+        }
 
     data_fetcher = APIDataFetcher(query=main_query)
     refresh_timer = RefreshTimer()
@@ -444,8 +464,8 @@ def InventoryOverTime(myTimer: func.TimerRequest) -> None:
     processing_service.InsertData()
 
 
-@app.schedule(schedule="0 22 1 * * *", arg_name="myTimer", run_on_startup=False,
-              use_monitor=False) 
+@app.schedule(schedule="0 25 2 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=True) 
 def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
 
@@ -458,7 +478,7 @@ def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
     query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= TRUNC(SYSDATE - 1) AND linelastmodifieddate < TRUNC(SYSDATE))"
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
     }
 
     data_fetcher = APIDataFetcher(query=main_query)
@@ -471,7 +491,7 @@ def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 28 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 30 2 * * *", arg_name="myTimer", run_on_startup=False,
             use_monitor=False) 
 def ItemFulfillments(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -482,11 +502,11 @@ def ItemFulfillments(myTimer: func.TimerRequest) -> None:
 
     netsuite_table_name = 'ItemShip'
 
-    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped'
+    query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
-    }
+            "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+        }
 
     data_fetcher = APIDataFetcher(query=main_query)
     refresh_timer = RefreshTimer()
@@ -498,7 +518,7 @@ def ItemFulfillments(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 32 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 35 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -512,9 +532,9 @@ def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
     query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= TRUNC(SYSDATE - 1) AND linelastmodifieddate < TRUNC(SYSDATE))"
-    }
-
+            "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
+        }
+    
     data_fetcher = APIDataFetcher(query=main_query)
     refresh_timer = RefreshTimer()
 
@@ -525,7 +545,7 @@ def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 39 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 40 2 * * *", arg_name="myTimer", run_on_startup=False,
             use_monitor=False) 
 def SalesOrders(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -539,8 +559,8 @@ def SalesOrders(myTimer: func.TimerRequest) -> None:
     query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
-    }
+            "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+        }
 
     data_fetcher = APIDataFetcher(query=main_query)
     refresh_timer = RefreshTimer()
@@ -552,7 +572,7 @@ def SalesOrders(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 43 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 45 2 * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -566,7 +586,7 @@ def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
     query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped, quantity'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= TRUNC(SYSDATE - 1) AND linelastmodifieddate < TRUNC(SYSDATE))"
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
     }
 
     data_fetcher = APIDataFetcher(query=main_query)
@@ -579,8 +599,8 @@ def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 50 1 * * *", arg_name="myTimer", run_on_startup=False,
-            use_monitor=False) 
+@app.schedule(schedule="0 50 2 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False)  
 def Items(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
 
@@ -593,7 +613,7 @@ def Items(myTimer: func.TimerRequest) -> None:
     query_items = 'id, class, displayname, lastmodifieddate, custitem_model, custitem_item_category, totalquantityonhand, custitem_ped_model, custitem_ped_battery_size'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+        "q": f"SELECT {query_items} FROM {netsuite_table_name} WHERE (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
     }
 
     data_fetcher = APIDataFetcher(query=main_query)
@@ -606,7 +626,7 @@ def Items(myTimer: func.TimerRequest) -> None:
     processing_service.UpdateData()
 
 
-@app.schedule(schedule="0 57 1 * * *", arg_name="myTimer", run_on_startup=False,
+@app.schedule(schedule="0 55 2 * * *", arg_name="myTimer", run_on_startup=False,
             use_monitor=False) 
 def Locations(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
@@ -620,7 +640,7 @@ def Locations(myTimer: func.TimerRequest) -> None:
     query_items = 'custrecord1, custrecord_loc_shiphawk_warehouse_code, fullname, id, includechildren, isinactive, lastmodifieddate, mainaddress, makeinventoryavailable, makeinventoryavailablestore, name, returnaddress, subsidiary, usebins, custrecord_n103_cseg_business_unit, locationtype, parent'
 
     main_query = {
-        "q": f"SELECT {query_items} FROM '{netsuite_table_name}' WHERE (lastmodifieddate >= TRUNC(SYSDATE - 1) AND lastmodifieddate < TRUNC(SYSDATE))"
+        "q": f"SELECT {query_items} FROM {netsuite_table_name}"
     }
 
     data_fetcher = APIDataFetcher(query=main_query)
