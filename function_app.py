@@ -651,3 +651,55 @@ def Locations(myTimer: func.TimerRequest) -> None:
     processing_service.GetData()
 
     processing_service.UpdateData()
+
+@app.schedule(schedule="0 00 3 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def InvAdjustments(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'id'
+    
+    Table_Name = "InvAdjustments" 
+
+    netsuite_table_name = 'InvAdjst'
+
+    query_items = 'id, foreigntotal, trandate, trandisplayname'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+@app.schedule(schedule="0 05 3 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def InvAdjustmentLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "InvAdjustmentLines" 
+
+    netsuite_table_name = 'InvAdjst'
+
+    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, quantity'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query)
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
