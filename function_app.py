@@ -25,9 +25,6 @@ token_secret = os.environ['tokenSecret']
 realm = os.environ['realm']
 connection_string = os.environ['connectionString']
 
-today = datetime.now().strftime('%m/%d/%Y')
-yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
-
 app = func.FunctionApp()
 
 max_retries = 3
@@ -38,7 +35,7 @@ class APIDataFetcher:
     '''
     Runs the SuiteQL to retrieve data and inserts it into the Azure MySQL database.
     '''
-    def __init__(self, query):
+    def __init__(self, query, yesterday, today):
         self.existing_data = None
         self.combined_df = None
         self.dataframes = None
@@ -49,6 +46,8 @@ class APIDataFetcher:
         self.query = query
         self.number_of_rows = None
         self.realm = realm
+        self.yesterday = yesterday
+        self.today = today
 
 
     def create_header(self):
@@ -70,7 +69,7 @@ class APIDataFetcher:
         return headers
     
     def get_date(self):
-        logging.info(f"Start Time: {yesterday} \n End Time: {today}")
+        logging.info(f"Start Time: {self.yesterday} \n End Time: {self.today}")
         
     def fetch_data(self):
         '''
@@ -203,7 +202,7 @@ class DataProcessingService:
         Failed = False
         try:
             if len(self.processed_data) > 0:
-                self.processed_data['Date'] = self.today
+                self.processed_data['Date'] = datetime.now().strftime('%m/%d/%Y')
                 self.processed_data.to_sql(name=self.table_name, con=self.engine, if_exists='append', index=False, chunksize=1000)
         except SQLAlchemyError as e:
             Failed = True
@@ -334,6 +333,8 @@ def WarmingUp(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def Classifications(myTimer: func.TimerRequest) -> None:
     logging.info(consumer) 
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -347,7 +348,7 @@ def Classifications(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM {netsuite_table_name}"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)    
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
 
@@ -360,6 +361,8 @@ def Classifications(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def Invoices(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -367,13 +370,13 @@ def Invoices(myTimer: func.TimerRequest) -> None:
 
     netsuite_table_name = "CustInvc"
 
-    query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier'
+    query_items = 'closedate, createddate, duedate, entity, estgrossprofit, id, lastmodifieddate, ordpicked, postingperiod, printedpickingticket, shipdate, status, trandate, shipcarrier, trandisplayname'
 
     main_query = {
             "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -387,7 +390,8 @@ def Invoices(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def ItemCategory(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
-
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
     unique_identifier = 'id'
     
     Table_Name = "ItemCategory" 
@@ -400,7 +404,7 @@ def ItemCategory(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM {netsuite_table_name}"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)  
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -414,6 +418,8 @@ def ItemCategory(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def Customers(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -427,7 +433,7 @@ def Customers(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM {netsuite_table_name} WHERE (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -441,6 +447,8 @@ def Customers(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def InventoryOverTime(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'inventorynumber'
     
@@ -454,7 +462,7 @@ def InventoryOverTime(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM {netsuite_table_name}"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -468,6 +476,8 @@ def InventoryOverTime(myTimer: func.TimerRequest) -> None:
               use_monitor=True) 
 def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'uniquekey'
     
@@ -481,7 +491,7 @@ def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
         "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
     }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -495,6 +505,8 @@ def InvoiceTransactionLines(myTimer: func.TimerRequest) -> None:
             use_monitor=False) 
 def ItemFulfillments(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -508,7 +520,7 @@ def ItemFulfillments(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -522,6 +534,8 @@ def ItemFulfillments(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'uniquekey'
     
@@ -535,7 +549,7 @@ def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
         }
     
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -549,6 +563,8 @@ def ItemFullTransactionLines(myTimer: func.TimerRequest) -> None:
             use_monitor=False) 
 def SalesOrders(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -562,7 +578,7 @@ def SalesOrders(myTimer: func.TimerRequest) -> None:
             "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
         }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -576,6 +592,8 @@ def SalesOrders(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'uniquekey'
     
@@ -589,7 +607,7 @@ def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
         "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
     }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -603,6 +621,8 @@ def SalesOrdTransactionLines(myTimer: func.TimerRequest) -> None:
             use_monitor=False)  
 def Items(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -616,7 +636,7 @@ def Items(myTimer: func.TimerRequest) -> None:
         "q": f"SELECT {query_items} FROM {netsuite_table_name} WHERE (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
     }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -630,7 +650,8 @@ def Items(myTimer: func.TimerRequest) -> None:
             use_monitor=False) 
 def Locations(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
-
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
     unique_identifier = 'id'
     
     Table_Name = "Location" 
@@ -643,7 +664,7 @@ def Locations(myTimer: func.TimerRequest) -> None:
         "q": f"SELECT {query_items} FROM {netsuite_table_name}"
     }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -656,6 +677,8 @@ def Locations(myTimer: func.TimerRequest) -> None:
             use_monitor=False) 
 def InvAdjustments(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'id'
     
@@ -663,13 +686,13 @@ def InvAdjustments(myTimer: func.TimerRequest) -> None:
 
     netsuite_table_name = 'InvAdjst'
 
-    query_items = 'id, foreigntotal, trandate, trandisplayname'
+    query_items = 'closedate, createddate, estgrossprofit, id, lastmodifieddate, postingperiod, printedpickingticket, status, trandate, trandisplayname'
 
     main_query = {
         "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
     }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -682,6 +705,8 @@ def InvAdjustments(myTimer: func.TimerRequest) -> None:
               use_monitor=False) 
 def InvAdjustmentLines(myTimer: func.TimerRequest) -> None:
     logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
 
     unique_identifier = 'uniquekey'
     
@@ -695,7 +720,7 @@ def InvAdjustmentLines(myTimer: func.TimerRequest) -> None:
         "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
     }
 
-    data_fetcher = APIDataFetcher(query=main_query)
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
     refresh_timer = RefreshTimer()
 
     processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
@@ -703,3 +728,233 @@ def InvAdjustmentLines(myTimer: func.TimerRequest) -> None:
     processing_service.GetData()
 
     processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 10 3 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def ItemRecp(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'id'
+    
+    Table_Name = "ItemReceipts" 
+
+    netsuite_table_name = 'ItemRcpt'
+
+    query_items = 'billingstatus, createddate, entity, id, lastmodifieddate, number, ordpicked, posting, postingperiod, printedpickingticket, status, trandate, trandisplayname'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 15 3 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def ItemRecpLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "ItemReceiptsTransactionLine" 
+
+    netsuite_table_name = 'ItemRcpt'
+
+    query_items = 'uniquekey, transaction, price, quantity, quantitybilled, quantitypacked, quantitypicked, quantityrejected, quantityshiprecv, rate, netamount, tl.memo, mainline, linesequencenumber, linelastmodifieddate, itemtype, item, isclosed, iscogs, fulfillable, expenseaccount, tl.entity, createdfrom, class'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+@app.schedule(schedule="0 10 3 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def PurchOrd(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'id'
+    
+    Table_Name = "PurchaseOrders" 
+
+    netsuite_table_name = 'PurchOrd'
+
+    query_items = 'actualshipdate, approvalstatus, billingaddress, billingstatus, closedate, createddate, custbody_bike_order, daysopen, entity, id, lastmodifieddate, ordpicked, postingperiod, shipdate, shippingaddress, status, tobeprinted, trandate, trandisplayname'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 20 3 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def PurchOrdLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "PurchaseOrdersTransactionLine" 
+
+    netsuite_table_name = 'PurchOrd'
+
+    query_items = 'cleared, dropship, tl.entity, expenseaccount, hasfulfillableitems, isbillable, isclosed, tl.actualshipdate, class, tl.closedate, expectedreceiptdate, fulfillable, hasfulfillableitems, item, itemtype, linelastmodifieddate, linesequencenumber, location, mainline, matchbilltoreceipt, tl.memo, netamount, quantity, quantitybilled, quantitypacked, quantitypicked, quantityrejected, quantityshiprecv, rate, transaction, uniquekey'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 25 3 * * *", arg_name="myTimer", run_on_startup=False,
+            use_monitor=False) 
+def ReturnAuth(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'id'
+    
+    Table_Name = "ReturnAuth"
+    netsuite_table_name = 'RtnAuth'
+
+    query_items = 'actualshipdate, billingaddress, billingstatus, closedate, createddate, entity, id, lastmodifieddate, memo, shippingaddress, status, trandate, trandisplayname'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transaction WHERE type = '{netsuite_table_name}' AND  (lastmodifieddate >= '{yesterday}' AND lastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 30 3 * * *", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def ReturnAuthLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'uniquekey'
+    
+    Table_Name = "ReturnAuthTransactionLine" 
+
+    netsuite_table_name = 'RtnAuth'
+
+    query_items = 'uniquekey, transaction, linesequencenumber, item, location, netamount, subsidiary, linelastmodifieddate, itemtype, isclosed, isfullyshipped, quantity'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM transactionLine tl INNER JOIN transaction t ON tl.transaction = t.id WHERE t.type = '{netsuite_table_name}' AND (linelastmodifieddate >= '{yesterday}' AND linelastmodifieddate < '{today}')"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.UpdateData()
+
+
+@app.schedule(schedule="0 35 3 * * 1", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def Accounts(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'id'
+    
+    Table_Name = "AccountingAccounts" 
+
+    netsuite_table_name = 'account'
+
+    query_items = 'accountsearchdisplayname, accountsearchdisplaynamecopy, acctnumber, accttype, description, fullname, id, isinactive, issummary, includechildren, lastmodifieddate, parent, subsidiary'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM {netsuite_table_name}"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.InsertData()
+
+
+@app.schedule(schedule="0 35 3 * * 1", arg_name="myTimer", run_on_startup=False,
+              use_monitor=False) 
+def TransactionAccountingLines(myTimer: func.TimerRequest) -> None:
+    logging.info(consumer)
+    today = datetime.now().strftime('%m/%d/%Y')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%m/%d/%Y')
+
+    unique_identifier = 'id'
+    
+    Table_Name = "AccountingAccounts" 
+
+    netsuite_table_name = ' transactionaccountingline al INNER JOIN transaction t ON t.id = al.transaction'
+
+    query_items = 'accountsearchdisplayname, accountsearchdisplaynamecopy, acctnumber, accttype, description, fullname, id, isinactive, issummary, includechildren, lastmodifieddate, parent, subsidiary'
+
+    main_query = {
+        "q": f"SELECT {query_items} FROM {netsuite_table_name}"
+    }
+
+    data_fetcher = APIDataFetcher(query=main_query, yesterday=yesterday, today=today)  
+    refresh_timer = RefreshTimer()
+
+    processing_service = DataProcessingService(data_fetcher, refresh_timer, table_name=Table_Name, unique_identifier=unique_identifier)
+
+    processing_service.GetData()
+
+    processing_service.InsertData()
